@@ -1,0 +1,29 @@
+name: Build RTL8188FU driver
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Install deps
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential dkms git bc linux-headers-$(uname -r)
+
+      - name: Clone driver
+        run: |
+          git clone https://github.com/kelebek333/rtl8188fu.git
+          cd rtl8188fu
+          make -j$(nproc)
+          tar -czvf ../rtl8188fu-driver.tar.gz *.ko
+
+      - name: Upload driver
+        uses: actions/upload-artifact@v3
+        with:
+          name: rtl8188fu-driver
+          path: rtl8188fu-driver.tar.gz
