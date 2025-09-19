@@ -1,0 +1,97 @@
+name: Build RTL8188FU module for A05 kernel
+
+on:
+  workflow_dispatch:
+
+env:
+  MEGA_LINK: "https://mega.nz/file/2MUjiTYK#Bf5auSu8Bv4S05UeUGwYsEJC8hHPgTl1PGXiTvHLpe8"
+  RTL_REPO: "https://github.com/kelebek333/rtl8188fu.git"
+  CROSS: "aarch64-linux-gnu-"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Install deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git wget curl unzip build-essential bc bison flex \
+          libssl-dev gcc-aarch64-linux-gnu crossbuild-essential-arm64 megatools
+
+    - name: Download kernel source from MEGA (your A05 source)
+      run: |
+        echo "Download kernel"
+        megadl "${{ env.MEGA_LINK }}" --path kernel.zip || (echo "megadl failed" && exit 1)
+        unzip -q kernel.zip -d kernel_src || (echo "unzip failed" && exit 1)
+        # find top-level kernel dir (where Makefile exists)
+        KDIR=$(find kernel_src -maxdepth 4 -type f -name Makefile -print | sed 's/\/Makefile//' | head -n1)
+        if [ -z "$KDIR" ]; then echo "ERROR: kernel top dir not found" && ls -la kernel_src && exit 1; fi
+        echo "KERNEL_DIR=$KDIR" > KERNEL_DIR.txt
+        echo "Found kernel dir: $KDIR"
+        ls -la "$KDIR"
+
+    - name: Ensure config present
+      run: |
+        if [ ! -f config_a05 ]; then echo "ERROR: config_a05 missing in repo root" && exit 1; fi
+        KDIR=$(cat KERNEL_DIR.txt | cut -d'=' -f2-)
+        cp config_a05 "$KDIR/.config"
+        cd "$KDIR"
+        export ARCH=arm64
+        make O=out olddefconfig || true
+        echo "Saved .config to $KDIR/.config"
+        ls -la "$KDIR/.config"
+
+    - name: Clone rtl8188fu driver
+      run: |
+        git clone --depth 1 "${{ env.RTL_REPO }}" rtl8188fu || true
+        ls -la rtl8188fu
+
+    - name: Build rtl8188fu module against extracted kernel
+      run: |
+        KDIR=$(cat KERNEL_DIR.txt | cut -d'=' -f2-)
+        echo "Kernel dir: $KDIR"
+        cd rtl8188fu || (echo "rtl src missing" && exit 1)
+        export KSRC="$KDIR"
+        export ARCH=arm64
+        export CROSS_COMPILE=${{ env.CROSS }}
+        make clean || true
+        make KSRC="$KSRC" ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j$(nproc) || (echo "module build failed" && exit 1)
+        ls -lah *.ko || true
+        cp *.ko $GITHUB_WORKSPACE/ || true
+
+    - name: Prepare test zip (flashable via TWRP)
+      run: |
+        mkdir -p anykernel/modules
+        cp *.ko anykernel/modules/ 2>/dev/null || true
+        cat > anykernel/install.sh <<'EOF'
+#!/sbin/sh
+# simple installer: copy ko to /lib/modules/$(uname -r)/extra and try insmod
+KMODS_DIR="/lib/modules/$(uname -r)/extra"
+mkdir -p "$KMODS_DIR"
+cp -f ./* "$KMODS_DIR/" 2>/dev/null || true
+for k in "$KMODS_DIR"/*.ko; do
+  if [ -f "$k" ]; then
+    insmod "$k" || echo "insmod failed $k"
+  fi
+done
+echo "done"
+EOF
+        chmod +x anykernel/install.sh
+        cd anykernel
+        zip -r ../module-test.zip . || true
+        cd ..
+
+    - name: Upload artifacts (module + kernel info)
+      uses: actions/upload-artifact@v3
+      with:
+        name: rtl-module
+        path: |
+          *.ko
+          module-test.zip
+          KERNEL_DIR.txt
+        if-no-files-found: warn
